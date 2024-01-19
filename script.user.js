@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SilverScripts
 // @namespace    http://tampermonkey.net/
-// @version      7.6.4
+// @version      7.6.6
 // @description  Find out prices of items in your inventory by hovering over them while at the Marketplace, in the Inner City, or whilst browsing your Inventory in the Outpost, automatically use services, edit and equip Quickswaps/Loadouts, and more!
 // @author       SilverBeam
 // @match        *fairview.deadfrontier.com/onlinezombiemmo/index.php*
@@ -15,8 +15,6 @@
 // @grant        GM.openInTab
 // @require      https://greasyfork.org/scripts/445697/code/index.js?version=1055427
 // @license      GPL-3.0-or-later
-// @downloadURL https://update.greasyfork.org/scripts/383308/SilverScripts.user.js
-// @updateURL https://update.greasyfork.org/scripts/383308/SilverScripts.meta.js
 // ==/UserScript==
 
 (function() {
@@ -41,8 +39,9 @@
     var userData = {};
     var savedMarketData = {"requestsIssued":0,"previousDataTimestamp":0,"previousItemTimestamp":{},"previousServicesTimestamp":0,"itemsDataBank":{},"servicesDataBank":{}};
     var characterCookieData = {};
+    var lastActiveUserID = null;
     var REQUEST_LIMIT = 17;
-    var userSettings = {"hoverPrices":true,"autoService":true,"autoMarketWithdraw":true};//Default Settings
+    var userSettings = {"hoverPrices":true,"autoService":true,"autoMarketWithdraw":true,"alwaysDisplayQuickSwitcher":false};//Default Settings
     var updateCheck = {"skipVer":"0.0.0","lastCheck":"1980-01-01"};
     var uploadedVersion; //This is saved here to avoid calling 2 times the GM library
 
@@ -139,6 +138,7 @@
                     ["button","Disable HoverPrices",[],flipSetting,["hoverPrices",0]],
                     ["button","Disable AutoService",[],flipSetting,["autoService",1]],
                     ["button","Disable AutoMarketWithdraw",[],flipSetting,["autoMarketWithdraw",2]],
+                    ["button","Enable AlwaysDisplayQuickSwitcher",[],flipSetting,["alwaysDisplayQuickSwitcher",3]],
                     ["p","",[]],
                     ["div","",[],[
                         ["button","Back",{"style":[["position","absolute"],["left","30px"]]},openHelpWindowPage,["home"]],
@@ -147,7 +147,8 @@
                 ],
             "style":
                 [
-                    ["height","110px"]
+                    ["height","110px"],
+                    ["width", "300px"]
                 ]
         },
         "loadoutsMenu": {
@@ -719,7 +720,9 @@
         }else{
             userData["tradezone"] = userVars["DFSTATS_df_tradezone"];
         }
-        userData.password = userVars["password"];
+        
+        lastActiveUserID = unsafeWindow.userVars['userID'];
+        GM.setValue("lastActiveUserID",lastActiveUserID);
     }
 
     function addItemToDatabank(flashType,quantity){
@@ -851,6 +854,7 @@
     async function loadStoredSettings(){
         //We stringify the default object as fallback
         userSettings = JSON.parse(await GM.getValue("userSettings",JSON.stringify(userSettings)));
+        console.log(userSettings)
         if(userSettings.hoverPrices == false){
             helpWindowStructure["settings"]["data"][0][1] = "Enable HoverPrices";
         }
@@ -859,6 +863,9 @@
         }
         if(userSettings.autoMarketWithdraw == false){
             helpWindowStructure["settings"]["data"][2][1] = "Enable AutoMarketWithdraw";
+        }
+        if(userSettings.alwaysDisplayQuickSwitcher == true){
+            helpWindowStructure["settings"]["data"][3][1] = "Disable AlwaysDisplayQuickSwitcher";
         }
     }
 
@@ -884,14 +891,27 @@
     }
 
     async function loadStoredCharacterCookieData(){
+        //Load stored cookie data
+        characterCookieData = JSON.parse(await GM.getValue("characterCookieData",JSON.stringify(characterCookieData)));
+        //Fix character cookie if loading from previous versions
+        for(let userID in characterCookieData){
+            if(characterCookieData[userID]['userID'] == undefined){
+                characterCookieData[userID]['userID'] = userID;
+            }
+        }
+        //Stop here if outside the home page due to the fact that userVars may not be available
         if(!isAtLocation("home")){
             return;
         }
-        //Load stored cookie data
-        characterCookieData = JSON.parse(await GM.getValue("characterCookieData",JSON.stringify(characterCookieData)));
         //Update current character cookie
-        let characterName = document.getElementById("sidebar").children[2].firstChild.textContent.trim();
-        characterCookieData[unsafeWindow.userVars['userID']] = {"characterName":characterName,"cookie":document.cookie};
+        let characterName = "";
+        if(characterCookieData[unsafeWindow.userVars['userID']] != undefined){
+            characterName = characterCookieData[unsafeWindow.userVars['userID']].characterName;
+        }else{
+            characterName = document.getElementById("sidebar").children[2].firstChild.textContent;
+        }
+        characterCookieData[unsafeWindow.userVars['userID']] = {"characterName":characterName,"cookie":document.cookie,
+                                                                "userID":unsafeWindow.userVars['userID']};
         //Save updated cookie data
         GM.setValue("characterCookieData",JSON.stringify(characterCookieData));
     }
@@ -902,6 +922,19 @@
             //Save updated cookie data
             GM.setValue("characterCookieData",JSON.stringify(characterCookieData));
         }
+    }
+
+    function changeCharacterCookieDataName(userID){
+        if(characterCookieData[userID] != undefined){
+            let newCharName = window.prompt("Input the new name for the saved character");
+            characterCookieData[userID]["characterName"] = newCharName.slice(0,16);
+            //Save updated cookie data
+            GM.setValue("characterCookieData",JSON.stringify(characterCookieData));
+        }
+    }
+
+    async function loadLastActiveUserID(){
+        lastActiveUserID = await GM.getValue("lastActiveUserID",null);
     }
 
     //////////////////////////////
@@ -2996,9 +3029,10 @@
     //Add character quick switcher button if at home. Credit to Rebekah/Tectonic Stupidity for the UI design.
     function addQuickSwitcherButton(){
         //check that home is open
-        if(!isAtLocation("home")){
+        if(!isAtLocation("home") && !userSettings.alwaysDisplayQuickSwitcher){
             return;
         }
+
         let mainSelect = document.body;
         let cluster = document.createElement("div");
         cluster.id = "silverScriptsQuickSwitcherCluster";
@@ -3006,7 +3040,12 @@
         cluster.style.rowGap = "5px";
         cluster.style.position = "fixed";
         cluster.style.top = "18px";
-        cluster.style.right = "2px";
+        //Move to the left in inventories for compatibility with Rebekah's Scripts
+        if(isAtLocation("inventories")){
+            cluster.style.left = "2px";
+        }else{
+            cluster.style.right = "2px";
+        }
         cluster.style.zIndex = "20";
         let container = document.createElement("div");
         container.style.height = "max-content";
@@ -3032,29 +3071,41 @@
         subContainer.style.display = "none";
         subContainer.style.rowGap = "10px";
 
-        for(let userID in characterCookieData){
+        //Sort users before displaying them
+        let sortedCharacterCookieDataKeys = Object.values(characterCookieData).sort((a, b) => a['characterName'].localeCompare(b['characterName']))
+        for(let user in sortedCharacterCookieDataKeys){
             let rowContainer = document.createElement("div");
             rowContainer.style.display = "grid";
-            rowContainer.style.gridTemplateColumns = "auto auto";
+            rowContainer.style.gridTemplateColumns = "auto max-content";
             rowContainer.style.columnGap = "10px";
 
             button = document.createElement("button");
-            button.dataset.userId = userID;
-            button.textContent = characterCookieData[userID]["characterName"];
-            button.style.height = "max-content";
+            button.dataset.userId = sortedCharacterCookieDataKeys[user]["userID"];
+            button.textContent = sortedCharacterCookieDataKeys[user]["characterName"];
+            button.style.height = "100%";
+            button.style.minWidth = "50px";
             button.style.display = "block";
             button.style.justifySelf = "left";
             button.addEventListener("click",function(e){
                 let userID = e.target.dataset.userId;
-                changeCharacter(characterCookieData[userID]["cookie"]);
+                if(e.shiftKey){
+                    changeCharacterCookieDataName(userID);
+                    //Reset the menu to refresh the view, reopening the saved users
+                    document.getElementById("silverScriptsQuickSwitcherCluster").remove();
+                    addQuickSwitcherButton();
+                    document.getElementById("silverScriptsQuickSwitcherUsersDisplay").style.display = "grid";
+                    document.getElementById("silverScriptsQuickSwitcherButton").style.display = "none";
+                }else{
+                    changeCharacter(characterCookieData[userID]["cookie"]);
+                }
             });
-            if(userID == unsafeWindow.userVars["userID"]){
+            if(sortedCharacterCookieDataKeys[user]["userID"] == lastActiveUserID){
                 button.disabled = true;
             }
             rowContainer.appendChild(button);
 
             button = document.createElement("button");
-            button.dataset.userId = userID;
+            button.dataset.userId = sortedCharacterCookieDataKeys[user]["userID"];
             button.textContent = "X";
             button.style.height = "max-content";
             button.style.display = "block";
@@ -3323,6 +3374,7 @@
         await loadStoredSettings();
         await loadSavedMarketData();
         await loadStoredCharacterCookieData();
+        await loadLastActiveUserID();
         initLoadouts();
         initInventoryArray();
         addAllAmmoToDatabank();
